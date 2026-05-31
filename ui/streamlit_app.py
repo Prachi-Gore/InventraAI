@@ -10,9 +10,9 @@ import streamlit as st
 from datetime import datetime
 import pandas as pd
 
-from agents.coordinator import process_query as run_agent_query
+from agents.coordinator import process_query_with_state as run_agent_query
 from agents.report_agent import get_inventory_status, get_sales_patterns, get_financial_summary
-from services.ticket_manager import get_pending_tickets, get_ticket_stats
+from services.ticket_manager import create_tickets_from_analysis, get_pending_tickets, get_ticket_stats
 from config.settings import get_settings
 from config.logger import get_logger
 from services.forecast_updater import get_forecast_updater
@@ -71,8 +71,11 @@ def init_session_state():
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I'm Inventra, your AI assistant for inventory and financial management. How can I help you today?"}
         ]
-    if "conversation_count" not in st.session_state:
-        st.session_state.conversation_count = 0
+
+
+def get_user_message_count() -> int:
+    """Count user messages stored in the current Streamlit session."""
+    return sum(1 for message in st.session_state.messages if message["role"] == "user")
 
 
 def render_sidebar():
@@ -120,7 +123,7 @@ def render_sidebar():
 
         st.markdown("---")
         st.markdown(f"**Model:** {get_settings().openai_model}")
-        st.markdown(f"**Session:** {st.session_state.conversation_count} messages")
+        st.markdown(f"**Session:** {get_user_message_count()} messages")
 
 
 def render_chat_interface():
@@ -128,16 +131,18 @@ def render_chat_interface():
     st.markdown("<div class='main-header'>Inventra AI Assistant</div>", unsafe_allow_html=True)
     st.markdown("<div class='sub-header'>Ask me anything about inventory, sales, finances, or get recommendations</div>", unsafe_allow_html=True)
 
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    render_reorder_ticket_action()
+
     # Check if there's a pending query from Quick Actions
     if 'pending_query' in st.session_state:
         prompt = st.session_state.pending_query
         del st.session_state.pending_query
         handle_user_query(prompt)
-
-    # Display chat messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
 
     # Chat input
     if prompt := st.chat_input("Ask about inventory, sales, finances, or get recommendations..."):
@@ -148,7 +153,6 @@ def handle_user_query(prompt: str):
     """Process a user query through the coordinator."""
     # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
-    st.session_state.conversation_count += 1
 
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -157,13 +161,19 @@ def handle_user_query(prompt: str):
     with st.chat_message("assistant"):
         with st.spinner("Analyzing..."):
             try:
-                response = run_agent_query(prompt)
+                response, final_state = run_agent_query(prompt)
 
                 # Display response
                 st.markdown(response)
 
                 # Add to messages
                 st.session_state.messages.append({"role": "assistant", "content": response})
+
+                decision_result = final_state.get("decision_result", {})
+                if final_state.get("intent") == "reorder_recommendation" and decision_result.get("context"):
+                    st.session_state.latest_reorder_analysis = decision_result
+
+                st.rerun()
 
             except Exception as e:
                 import traceback
@@ -173,6 +183,26 @@ def handle_user_query(prompt: str):
                 logger.error(f"Error processing query: {e}")
                 logger.error(traceback.format_exc())
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                st.rerun()
+
+
+def render_reorder_ticket_action():
+    """Show a human-confirmed ticket creation action for the latest reorder analysis."""
+    analysis = st.session_state.get("latest_reorder_analysis")
+    if not analysis:
+        return
+
+    low_stock_items = analysis.get("context", {}).get("inventory", {}).get("low_stock_items", [])
+    if not low_stock_items:
+        return
+
+    st.info(f"Latest recommendation found {len(low_stock_items)} low-stock item(s).")
+    if st.button("Create reorder tickets from latest recommendation", type="primary"):
+        result = create_tickets_from_analysis(analysis)
+        message = result.get("summary", "Ticket creation completed.")
+        st.session_state.messages.append({"role": "assistant", "content": message})
+        del st.session_state.latest_reorder_analysis
+        st.rerun()
 
 
 def render_data_explorer():
@@ -262,24 +292,24 @@ def render_ticket_manager():
         )
 
         # Ticket actions
-        st.markdown("#### Update Ticket Status")
-        col1, col2, col3 = st.columns([2, 2, 1])
+        # st.markdown("#### Update Ticket Status")
+        # col1, col2, col3 = st.columns([2, 2, 1])
 
-        with col1:
-            ticket_id = st.selectbox("Select Ticket", [t['id'] for t in tickets])
+        # with col1:
+        #     ticket_id = st.selectbox("Select Ticket", [t['id'] for t in tickets])
 
-        with col2:
-            new_status = st.selectbox("New Status", ["pending", "approved", "rejected", "completed"])
+        # with col2:
+        #     new_status = st.selectbox("New Status", ["pending", "approved", "rejected", "completed"])
 
-        with col3:
-            if st.button("Update"):
-                from services.ticket_manager import update_ticket_status
-                result = update_ticket_status(ticket_id, new_status)
-                if result['success']:
-                    st.success(result['message'])
-                    st.rerun()
-                else:
-                    st.error(result.get('error', 'Failed to update'))
+        # with col3:
+    #         if st.button("Update"):
+    #             from services.ticket_manager import update_ticket_status
+    #             result = update_ticket_status(ticket_id, new_status)
+    #             if result['success']:
+    #                 st.success(result['message'])
+    #                 st.rerun()
+    #             else:
+    #                 st.error(result.get('error', 'Failed to update'))
     else:
         st.info("No pending tickets")
 
@@ -387,7 +417,7 @@ def main():
     render_sidebar()
 
     # Main tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat Assistant", "📊 Data Explorer", "📝 Tickets", "🎯 Forecast Accuracy"])
+    tab1, tab2, tab3 = st.tabs(["💬 Chat Assistant", "📊 Data Explorer", "📝 Tickets", ]) # "🎯 Forecast Accuracy"
 
     with tab1:
         render_chat_interface()
@@ -398,8 +428,8 @@ def main():
     with tab3:
         render_ticket_manager()
 
-    with tab4:
-        render_forecast_accuracy()
+    # with tab4:
+    #     render_forecast_accuracy()
 
 
 if __name__ == "__main__":

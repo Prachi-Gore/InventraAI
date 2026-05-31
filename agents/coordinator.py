@@ -1,7 +1,7 @@
 """LangGraph orchestration - Functional implementation."""
 
 import operator
-from typing import Dict, Any, TypedDict, Annotated, Sequence, Callable, Optional
+from typing import Dict, Any, TypedDict, Annotated, Sequence, Callable, Optional, Tuple
 from functools import partial
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -430,15 +430,15 @@ def save_conversation_to_memory(
 
 # Main processing function
 
-def process_query(query: str, session_id: Optional[str] = None) -> str:
-    """Process user query through multi-agent workflow.
+def process_query_with_state(query: str, session_id: Optional[str] = None) -> Tuple[str, AgentState]:
+    """Process user query through multi-agent workflow and return final state.
 
     Args:
         query: User query string
         session_id: Optional session identifier for memory
 
     Returns:
-        Final response string
+        Tuple of final response string and final workflow state
     """
     settings = get_settings()
 
@@ -460,4 +460,18 @@ def process_query(query: str, session_id: Optional[str] = None) -> str:
     # Save to memory
     save_conversation_to_memory(session_id, query, response, final_state)
 
+    return response, final_state
+
+
+def process_query(query: str, session_id: Optional[str] = None) -> str:
+    """Process user query through multi-agent workflow.
+
+    Args:
+        query: User query string
+        session_id: Optional session identifier for memory
+
+    Returns:
+        Final response string
+    """
+    response, _ = process_query_with_state(query, session_id)
     return response
