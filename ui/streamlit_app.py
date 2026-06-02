@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+import os
 
 # Add parent directory to path so we can import agents and utils
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -12,9 +13,10 @@ import pandas as pd
 
 from agents.coordinator import process_query_with_state as run_agent_query
 from agents.report_agent import get_inventory_status, get_sales_patterns, get_financial_summary
-from services.ticket_manager import create_tickets_from_analysis, get_pending_tickets, get_ticket_stats
+from services.ticket_manager import create_tickets_from_analysis, delete_ticket, get_pending_tickets, get_ticket_stats, update_ticket_status
 from config.settings import get_settings
 from config.logger import get_logger
+from database.db_manager import query, to_dataframe
 from services.forecast_updater import get_forecast_updater
 
 logger = get_logger(__name__)
@@ -275,6 +277,74 @@ def render_data_explorer():
             st.bar_chart(reg_df.set_index("Region"))
 
 
+def get_admin_password():
+    """Read admin password from Streamlit secrets first, then environment."""
+    try:
+        return st.secrets.get("ADMIN_PASSWORD")
+    except Exception:
+        return os.getenv("ADMIN_PASSWORD")
+
+
+def quote_identifier(identifier: str) -> str:
+    """Quote a SQLite identifier selected from trusted metadata."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def get_database_tables():
+    """Return user-created SQLite tables."""
+    return query(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """
+    )
+
+
+def render_admin_database_viewer():
+    """Render a protected database table viewer for production inspection."""
+    st.markdown("### Admin Database Viewer")
+
+    admin_password = get_admin_password()
+    if admin_password:
+        entered_password = st.text_input("Admin password", type="password")
+        if entered_password != admin_password:
+            st.info("Enter the admin password to view database tables.")
+            return
+    else:
+        st.warning("ADMIN_PASSWORD is not configured. Set it in Streamlit Secrets before using this in production.")
+
+    db_path = get_settings().db_path_resolved
+    st.caption(f"Database: {db_path}")
+
+    tables = [row["name"] for row in get_database_tables()]
+    if not tables:
+        st.info("No database tables found.")
+        return
+
+    col1, col2 = st.columns([2, 1])
+    selected_table = col1.selectbox("Table", tables)
+    row_limit = col2.number_input("Rows", min_value=10, max_value=1000, value=100, step=10)
+
+    safe_table_name = quote_identifier(selected_table)
+    count_df = to_dataframe(f"SELECT COUNT(*) AS total_rows FROM {safe_table_name}")
+    total_rows = int(count_df.iloc[0]["total_rows"]) if not count_df.empty else 0
+    st.metric("Total Rows", total_rows)
+
+    df = to_dataframe(f"SELECT * FROM {safe_table_name} LIMIT ?", params=(int(row_limit),))
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download displayed rows as CSV",
+        data=csv,
+        file_name=f"{selected_table}.csv",
+        mime="text/csv",
+    )
+
+
 def render_ticket_manager():
     """Render ticket manager tab."""
     st.markdown("### 📝 Ticket Manager")
@@ -307,25 +377,36 @@ def render_ticket_manager():
             hide_index=True
         )
 
-        # Ticket actions
-        # st.markdown("#### Update Ticket Status")
-        # col1, col2, col3 = st.columns([2, 2, 1])
+        st.markdown("#### Manage Pending Tickets")
+        with st.expander("Edit or delete a ticket"):
+            ticket_options = [
+                (t['id'], f"#{t['id']} - {t.get('product_name', t.get('sku', ''))} ({t.get('priority', '')})")
+                for t in tickets
+            ]
+            ticket_id = st.selectbox(
+                "Choose ticket",
+                [opt[0] for opt in ticket_options],
+                format_func=lambda x: next(label for value, label in ticket_options if value == x)
+            )
 
-        # with col1:
-        #     ticket_id = st.selectbox("Select Ticket", [t['id'] for t in tickets])
+            col1, col2 = st.columns([2, 1])
+            new_status = col1.selectbox("New Status", ["pending", "approved", "rejected", "completed"])
 
-        # with col2:
-        #     new_status = st.selectbox("New Status", ["pending", "approved", "rejected", "completed"])
+            if col2.button("Update Status", key=f"update_status_{ticket_id}"):
+                result = update_ticket_status(ticket_id, new_status)
+                if result.get('success'):
+                    st.success(result['message'])
+                    st.rerun()
+                else:
+                    st.error(result.get('error', 'Failed to update ticket'))
 
-        # with col3:
-    #         if st.button("Update"):
-    #             from services.ticket_manager import update_ticket_status
-    #             result = update_ticket_status(ticket_id, new_status)
-    #             if result['success']:
-    #                 st.success(result['message'])
-    #                 st.rerun()
-    #             else:
-    #                 st.error(result.get('error', 'Failed to update'))
+            if col2.button("Delete Ticket", key=f"delete_ticket_{ticket_id}"):
+                result = delete_ticket(ticket_id)
+                if result.get('success'):
+                    st.success(result['message'])
+                    st.rerun()
+                else:
+                    st.error(result.get('error', 'Failed to delete ticket'))
     else:
         st.info("No pending tickets")
 

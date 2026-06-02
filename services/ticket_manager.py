@@ -146,6 +146,40 @@ def update_ticket_status(
         }
 
 
+def delete_ticket(ticket_id: int) -> Dict[str, Any]:
+    """Delete a ticket from the database.
+
+    Args:
+        ticket_id: Ticket ID to delete
+
+    Returns:
+        Dictionary with delete result
+    """
+    sql = "DELETE FROM tickets WHERE id = ?"
+
+    try:
+        rows = execute(sql, (ticket_id,))
+
+        if rows > 0:
+            logger.info(f"Deleted ticket #{ticket_id}")
+            return {
+                'success': True,
+                'ticket_id': ticket_id,
+                'message': f"Ticket #{ticket_id} deleted"
+            }
+        else:
+            return {
+                'success': False,
+                'error': f"Ticket #{ticket_id} not found"
+            }
+    except Exception as e:
+        logger.error(f"Failed to delete ticket #{ticket_id}: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
 def get_ticket_stats() -> Dict[str, Any]:
     """Get ticket statistics.
 
